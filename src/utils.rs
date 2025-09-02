@@ -110,3 +110,59 @@ pub fn select_best_with_distances(outputs: &[String]) -> PyResult<MbrResult> {
         avg_distances,
     })
 }
+
+// Struttura per contenere i risultati del majority voting
+#[derive(Debug)]
+pub struct MajorityVotingResult {
+    pub best_response: String,
+    pub best_index: usize,
+    pub vote_counts: HashMap<String, usize>,
+    pub all_responses: Vec<String>,
+}
+
+// Funzione per selezionare la migliore risposta usando majority voting.
+// Conta le occorrenze di ogni risposta unica e seleziona quella più frequente.
+pub fn select_best_by_majority_voting(outputs: &[String]) -> PyResult<MajorityVotingResult> {
+    let n = outputs.len();
+    if n == 0 {
+        return Err(PyValueError::new_err("No outputs provided"));
+    }
+    if n == 1 {
+        let mut vote_counts = HashMap::new();
+        vote_counts.insert(outputs[0].clone(), 1);
+        return Ok(MajorityVotingResult {
+            best_response: outputs[0].clone(),
+            best_index: 0,
+            vote_counts,
+            all_responses: outputs.to_vec(),
+        });
+    }
+
+    // Conta le occorrenze di ogni risposta
+    let mut vote_counts: HashMap<String, usize> = HashMap::new();
+    for response in outputs {
+        *vote_counts.entry(response.clone()).or_insert(0) += 1;
+    }
+
+    // Trova la risposta con il maggior numero di voti
+    let mut max_votes = 0;
+    let mut best_response = String::new();
+    for (response, count) in &vote_counts {
+        if *count > max_votes {
+            max_votes = *count;
+            best_response = response.clone();
+        }
+    }
+
+    // Trova l'indice della prima occorrenza della risposta vincente
+    let best_index = outputs.iter()
+        .position(|r| r == &best_response)
+        .unwrap_or(0);
+
+    Ok(MajorityVotingResult {
+        best_response,
+        best_index,
+        vote_counts,
+        all_responses: outputs.to_vec(),
+    })
+}
