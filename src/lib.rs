@@ -1,9 +1,10 @@
 // lib.rs
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple, PyString, PyCFunction};
+use pyo3::types::{PyDict, PyTuple, PyString, PyCFunction, PyList, PyFloat};
 use std::collections::{HashMap, HashSet};
 use pyo3::exceptions::PyValueError;
+use std::time::{Instant, Duration};
 
 // Funzione helper per tokenizzare una stringa in parole (split su whitespace).
 // Passo 1: Tokenizzazione semplice per bag-of-words.
@@ -30,18 +31,30 @@ fn cosine_distance(a: &[f64], b: &[f64]) -> f64 {
     1.0 - cosine_similarity(a, b)
 }
 
+// Struttura per contenere i risultati dell'analisi MBR
+#[derive(Debug)]
+struct MbrResult {
+    best_response: String,
+    best_index: usize,
+    avg_distances: Vec<f64>,
+}
+
 // Funzione per selezionare la migliore risposta basandosi sulla distanza coseno media minima.
 // Assume che le risposte siano stringhe e usa un approccio bag-of-words per vettorizzare.
 // Passo 4: Vettorizzazione delle risposte usando conteggi di parole (TF, senza IDF per semplicità).
 // Passo 5: Calcolo delle distanze medie per ciascun candidato.
 // Passo 6: Selezione dell'indice con la distanza media minima (Minimum Bayes Risk approssimato).
-fn select_best(outputs: &[String]) -> PyResult<String> {
+fn select_best_with_distances(outputs: &[String]) -> PyResult<MbrResult> {
     let n = outputs.len();
     if n == 0 {
         return Err(PyValueError::new_err("No outputs provided"));
     }
     if n == 1 {
-        return Ok(outputs[0].clone());
+        return Ok(MbrResult {
+            best_response: outputs[0].clone(),
+            best_index: 0,
+            avg_distances: vec![0.0],
+        });
     }
 
     // Raccogli tutte le parole uniche da tutte le risposte.
@@ -71,9 +84,11 @@ fn select_best(outputs: &[String]) -> PyResult<String> {
         vectors.push(vec);
     }
 
-    // Trova l'indice con la distanza media minima.
+    // Trova l'indice con la distanza media minima e calcola tutte le distanze.
     let mut min_avg_dist = f64::INFINITY;
     let mut best_idx = 0;
+    let mut avg_distances = Vec::with_capacity(n);
+    
     for i in 0..n {
         let mut total_dist = 0.0;
         for j in 0..n {
@@ -83,13 +98,19 @@ fn select_best(outputs: &[String]) -> PyResult<String> {
             total_dist += cosine_distance(&vectors[i], &vectors[j]);
         }
         let avg_dist = total_dist / ((n - 1) as f64);
+        avg_distances.push(avg_dist);
+        
         if avg_dist < min_avg_dist {
             min_avg_dist = avg_dist;
             best_idx = i;
         }
     }
 
-    Ok(outputs[best_idx].clone())
+    Ok(MbrResult {
+        best_response: outputs[best_idx].clone(),
+        best_index: best_idx,
+        avg_distances,
+    })
 }
 
 // Funzione helper per creare il wrapper della funzione decorata.
@@ -99,21 +120,62 @@ fn select_best(outputs: &[String]) -> PyResult<String> {
 fn create_wrapper(py: Python, func: PyObject, num_calls: usize) -> PyResult<PyObject> {
     let closure = PyCFunction::new_closure(py, None, None, move |args, kwargs| {
         Python::with_gil(|py| {
+            let start_time = Instant::now();
+            
             // Esegui le chiamate sequenzialmente per evitare problemi di pickling.
             let mut outputs: Vec<String> = Vec::with_capacity(num_calls);
+            let mut individual_times: Vec<f64> = Vec::with_capacity(num_calls);
 
             for _ in 0..num_calls {
+                let call_start = Instant::now();
+                
                 // Chiama la funzione con gli argomenti originali.
                 let result = func.call(py, args, kwargs)?;
                 // Assume che la funzione restituisca una stringa (risposta LLM).
-                outputs.push(result.extract::<String>(py)?);
+                let response = result.extract::<String>(py)?;
+                
+                let call_duration = call_start.elapsed();
+                outputs.push(response);
+                individual_times.push(call_duration.as_secs_f64());
             }
 
-            // Seleziona il migliore.
-            let best = select_best(&outputs)?;
+            // Seleziona il migliore con le distanze.
+            let mbr_result = select_best_with_distances(&outputs)?;
+            let total_time = start_time.elapsed();
 
-            // Restituisci come PyString.
-            Ok::<PyObject, PyErr>(PyString::new(py, &best).into())
+            // Crea il dizionario di output.
+            let result_dict = PyDict::new(py);
+            
+            // Risposta selezionata
+            result_dict.set_item("selected_response", PyString::new(py, &mbr_result.best_response))?;
+            
+            // Tempo totale di esecuzione
+            result_dict.set_item("total_execution_time", PyFloat::new(py, total_time.as_secs_f64()))?;
+            
+            // Tutte le risposte con i loro tempi
+            let responses_list = PyList::empty(py);
+            for (i, (response, time)) in outputs.iter().zip(individual_times.iter()).enumerate() {
+                let response_dict = PyDict::new(py);
+                response_dict.set_item("index", i)?;
+                response_dict.set_item("response", PyString::new(py, response))?;
+                response_dict.set_item("execution_time", PyFloat::new(py, *time))?;
+                response_dict.set_item("avg_distance", PyFloat::new(py, mbr_result.avg_distances[i]))?;
+                responses_list.append(response_dict)?;
+            }
+            result_dict.set_item("all_responses", responses_list)?;
+            
+            // Indice della risposta selezionata
+            result_dict.set_item("selected_index", mbr_result.best_index)?;
+            
+            // Distanze medie per MBR
+            let distances_list = PyList::empty(py);
+            for distance in &mbr_result.avg_distances {
+                distances_list.append(PyFloat::new(py, *distance))?;
+            }
+            result_dict.set_item("mbr_distances", distances_list)?;
+
+            // Restituisci il dizionario.
+            Ok::<PyObject, PyErr>(result_dict.into())
         })
     })?;
     Ok(closure.into())
