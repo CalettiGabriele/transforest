@@ -24,7 +24,8 @@ PROVIDERS = {
 
 DECORATORS = {
     "mbr": {"name": "Minimum Bayes Risk", "desc": "Lowest cosine distance"},
-    "voting": {"name": "Majority Voting", "desc": "Most frequent response"}
+    "voting": {"name": "Majority Voting", "desc": "Most frequent response"},
+    "blender": {"name": "AI Blender", "desc": "AI-enhanced ranking and fusion via LLM"}
 }
 
 def create_llm_function(provider, model, api_key, decorator_type, num_calls):
@@ -32,8 +33,17 @@ def create_llm_function(provider, model, api_key, decorator_type, num_calls):
     
     if decorator_type == "mbr":
         decorator = transforest.minimum_bayes_risk(num_calls=num_calls)
-    else:
+    elif decorator_type == "voting":
         decorator = transforest.majority_voting(num_calls=num_calls)
+    else:  # blender
+        # Blender now requires inference_config parameter
+        inference_config = {
+            "provider": provider,
+            "api_key": api_key,
+            "model": model,
+            "message": "You are an expert evaluator. Analyze and compare responses objectively for quality, accuracy, and completeness."
+        }
+        decorator = transforest.blender(num_calls=num_calls, inference_config=inference_config)
     
     if provider == "groq":
         client = Groq(api_key=api_key)
@@ -72,9 +82,13 @@ def display_results(result, decorator_type):
     
     if decorator_type == "mbr":
         console.print(f"[dim]Best distance: {min(resp['avg_distance'] for resp in result['all_responses']):.4f}[/dim]")
-    else:
+    elif decorator_type == "voting":
         max_votes = max(result['vote_counts'].values())
         console.print(f"[dim]Votes: {max_votes}/{len(result['all_responses'])}[/dim]")
+    else:  # blender
+        best_score = max(result['ranking_scores'])
+        ai_enhanced = result.get('ai_enhanced', False)
+        console.print(f"[dim]Best ranking score: {best_score:.4f} | Fused candidates: {len(result['fused_candidates'])} | AI Enhanced: {ai_enhanced}[/dim]")
 
 def display_detailed_results(result, decorator_type):
     """Display detailed results with all responses, times, and data"""
@@ -104,7 +118,7 @@ def display_detailed_results(result, decorator_type):
                 style="bold green" if is_best else None
             )
         
-    else:  # voting
+    elif decorator_type == "voting":
         max_votes = max(result['vote_counts'].values())
         console.print(f"Max votes: {max_votes}/{len(result['all_responses'])}\n")
         
@@ -125,6 +139,37 @@ def display_detailed_results(result, decorator_type):
                 style="bold green" if is_best else None
             )
     
+    else:  # blender
+        best_score = max(result['ranking_scores'])
+        ai_enhanced = result.get('ai_enhanced', False)
+        console.print(f"Best ranking score: {best_score:.4f} | Fused candidates: {len(result['fused_candidates'])} | AI Enhanced: {ai_enhanced}\n")
+        
+        # Show fused candidates first
+        if result['fused_candidates']:
+            ai_enhanced = result.get('ai_enhanced', False)
+            title = "AI-Generated Fused Candidates:" if ai_enhanced else "Fused Candidates:"
+            console.print(f"[bold]{title}[/bold]")
+            for i, candidate in enumerate(result['fused_candidates']):
+                console.print(f"  {i+1}. {candidate[:200]}{'...' if len(candidate) > 200 else ''}")
+            console.print()
+        
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("#", width=3)
+        table.add_column("Response", max_width=50)
+        table.add_column("Time", width=6)
+        table.add_column("Rank Score", width=10)
+        
+        for resp in result['all_responses']:
+            is_best = resp['index'] == result['selected_index']
+            marker = "*" if is_best else " "
+            table.add_row(
+                f"{marker}{resp['index']}",
+                resp['response'],
+                f"{resp['execution_time']:.2f}s",
+                f"{resp['ranking_score']:.4f}",
+                style="bold green" if is_best else None
+            )
+    
     console.print(table)
 
 
@@ -132,7 +177,7 @@ def show_welcome():
     """Show welcome message"""
     console.clear()
     console.print("[bold blue]Transforest CLI[/bold blue]")
-    console.print("[dim]Commands: q=quit, b=back, d=details (after results)[/dim]\n")
+    console.print("[dim]Commands: q=quit, b=back, d=details[/dim]\n")
 
 def select_provider():
     """Select LLM provider"""
