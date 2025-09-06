@@ -6,7 +6,7 @@ use pyo3::exceptions::PyValueError;
 use std::time::Instant;
 
 mod utils;
-use crate::utils::{select_best_with_distances, select_best_by_majority_voting, select_best_with_blender};
+use crate::utils::{select_best_with_distances, select_best_by_majority_voting, select_best_with_blender, select_best_with_ai_blender, InferenceConfig};
 
 // Funzione helper per creare il wrapper della funzione decorata.
 // Passo 7: Uso di multiprocessing per eseguire chiamate parallele (vero parallelismo, bypassando GIL).
@@ -219,7 +219,7 @@ fn majority_voting(py: Python, args: &Bound<PyTuple>, kwargs: Option<&Bound<PyDi
 }
 
 // Funzione helper per creare il wrapper del blender decorator
-fn create_blender_wrapper(py: Python, func: PyObject, num_calls: usize, top_k: Option<usize>) -> PyResult<PyObject> {
+fn create_blender_wrapper(py: Python, func: PyObject, num_calls: usize, top_k: Option<usize>, inference_config: InferenceConfig) -> PyResult<PyObject> {
     let closure = PyCFunction::new_closure(py, None, None, move |args, kwargs| {
         Python::with_gil(|py| {
             let start_time = Instant::now();
@@ -242,8 +242,8 @@ fn create_blender_wrapper(py: Python, func: PyObject, num_calls: usize, top_k: O
                 outputs.push(output_str);
             }
             
-            // Usa il blender per selezionare la migliore risposta
-            let blender_result = select_best_with_blender(&outputs, top_k)?;
+            // Usa sempre il blender AI-enhanced
+            let blender_result = select_best_with_ai_blender(&outputs, top_k, &inference_config)?;
             let total_time = start_time.elapsed().as_secs_f64();
             
             // Crea il dizionario di output
@@ -273,6 +273,9 @@ fn create_blender_wrapper(py: Python, func: PyObject, num_calls: usize, top_k: O
             }
             result_dict.set_item("all_responses", all_responses_list)?;
             
+            // Il blender usa sempre AI enhancement
+            result_dict.set_item("ai_enhanced", true)?;
+            
             Ok::<PyObject, PyErr>(result_dict.into())
         })
     })?;
@@ -286,15 +289,17 @@ fn blender(py: Python, args: &Bound<PyTuple>, kwargs: Option<&Bound<PyDict>>) ->
     let default_num_calls = 5;
     let default_top_k = 3;
     
-    // Caso 1: @blender (senza parametri)
+    // Caso 1: @blender (senza parametri) - ERRORE perché inference_config è obbligatorio
     if args.len() == 1 && args.get_item(0)?.is_callable() {
-        let func = args.get_item(0)?.clone().into();
-        return create_blender_wrapper(py, func, default_num_calls, Some(default_top_k));
+        return Err(PyValueError::new_err(
+            "blender decorator requires 'inference_config' parameter. Usage: @blender(inference_config={...})"
+        ));
     }
     
     // Caso 2: @blender(...) con parametri
     let mut num_calls = default_num_calls;
     let mut top_k = Some(default_top_k);
+    let mut inference_config: Option<InferenceConfig> = None;
     
     if let Some(kw) = kwargs {
         if let Some(n) = kw.get_item("num_calls")? {
@@ -303,12 +308,25 @@ fn blender(py: Python, args: &Bound<PyTuple>, kwargs: Option<&Bound<PyDict>>) ->
         if let Some(k) = kw.get_item("top_k")? {
             top_k = Some(k.extract::<usize>()?);
         }
+        if let Some(config) = kw.get_item("inference_config")? {
+            inference_config = Some(config.extract::<InferenceConfig>()?);
+        }
     } else if args.len() >= 1 {
         num_calls = args.get_item(0)?.extract::<usize>()?;
         if args.len() >= 2 {
             top_k = Some(args.get_item(1)?.extract::<usize>()?);
         }
+        if args.len() >= 3 {
+            inference_config = Some(args.get_item(2)?.extract::<InferenceConfig>()?);
+        }
     }
+    
+    // Verifica che inference_config sia stato fornito
+    let inference_config = inference_config.ok_or_else(|| {
+        PyValueError::new_err(
+            "blender decorator requires 'inference_config' parameter. Usage: @blender(inference_config={'provider': '...', 'api_key': '...', 'model': '...'})"
+        )
+    })?;
     
     // Restituisci una closure che agisce come decoratore
     let decorator = PyCFunction::new_closure(py, None, None, move |dec_args, _dec_kwargs| {
@@ -317,7 +335,7 @@ fn blender(py: Python, args: &Bound<PyTuple>, kwargs: Option<&Bound<PyDict>>) ->
                 return Err(PyValueError::new_err("Decorator expects a callable"));
             }
             let func = dec_args.get_item(0)?.clone().into();
-            create_blender_wrapper(py, func, num_calls, top_k)
+            create_blender_wrapper(py, func, num_calls, top_k, inference_config.clone())
         })
     })?;
     Ok(decorator.into())
