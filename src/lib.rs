@@ -6,7 +6,7 @@ use pyo3::exceptions::PyValueError;
 use std::time::Instant;
 
 mod utils;
-use crate::utils::{select_best_with_distances, select_best_by_majority_voting, select_best_with_blender, select_best_with_ai_blender, InferenceConfig};
+use crate::utils::{select_best_with_distances, select_best_by_majority_voting, select_best_with_ai_blender, InferenceConfig};
 
 // Funzione helper per creare il wrapper della funzione decorata.
 // Passo 7: Uso di multiprocessing per eseguire chiamate parallele (vero parallelismo, bypassando GIL).
@@ -118,26 +118,59 @@ fn create_majority_voting_wrapper(py: Python, func: PyObject, num_calls: usize) 
     let closure = PyCFunction::new_closure(py, None, None, move |args, kwargs| {
         Python::with_gil(|py| {
             let start_time = Instant::now();
-            
-            // Esegui le chiamate sequenzialmente per evitare problemi di pickling.
-            let mut outputs: Vec<String> = Vec::with_capacity(num_calls);
-            let mut individual_times: Vec<f64> = Vec::with_capacity(num_calls);
 
+            // Converte e clona args/kwargs/func in oggetti Py<...> trasferibili tra thread
+            let args_owned = args.clone().unbind();
+            let kwargs_owned = kwargs.map(|kw| kw.clone().unbind());
+            let func_obj = func.clone_ref(py);
+
+            // Prepara un vettore di specifiche di chiamata (uno per thread)
+            let mut call_specs: Vec<(PyObject, Py<PyTuple>, Option<Py<PyDict>>)> = Vec::with_capacity(num_calls);
             for _ in 0..num_calls {
-                let call_start = Instant::now();
-                
-                // Chiama la funzione con gli argomenti originali.
-                let result = func.call(py, args, kwargs)?;
-                // Assume che la funzione restituisca una stringa (risposta LLM).
-                let response = result.extract::<String>(py)?;
-                
-                let call_duration = call_start.elapsed();
-                outputs.push(response);
-                individual_times.push(call_duration.as_secs_f64());
+                let f_clone = func_obj.clone_ref(py);
+                let a_clone = args_owned.clone_ref(py);
+                let k_clone = kwargs_owned.as_ref().map(|kk| kk.clone_ref(py));
+                call_specs.push((f_clone, a_clone, k_clone));
             }
 
-            // Seleziona il migliore con majority voting.
-            let voting_result = select_best_by_majority_voting(&outputs)?;
+            // Esegue le chiamate in parallelo con thread Rust, ciascuno acquisisce il GIL per la chiamata Python
+            let (outputs, individual_times): (Vec<String>, Vec<f64>) = py.allow_threads(|| -> PyResult<(Vec<String>, Vec<f64>)> {
+                let mut handles = Vec::with_capacity(num_calls);
+                for (f, a, k) in call_specs.into_iter() {
+                    handles.push(std::thread::spawn(move || {
+                        let call_start = Instant::now();
+                        // Esegue la singola chiamata al callable Python acquisendo il GIL nel thread
+                        let resp = Python::with_gil(|py| -> PyResult<String> {
+                            let f_b = f.bind(py);
+                            let a_b = a.bind(py);
+                            let k_b = k.as_ref().map(|kk| kk.bind(py));
+                            let result = match &k_b {
+                                Some(kk) => f_b.call(a_b, Some(kk))?,
+                                None => f_b.call(a_b, None)?,
+                            };
+                            result.extract::<String>()
+                        });
+                        match resp {
+                            Ok(s) => Ok((s, call_start.elapsed().as_secs_f64())),
+                            Err(e) => Err(e),
+                        }
+                    }));
+                }
+
+                let mut outs = Vec::with_capacity(num_calls);
+                let mut times = Vec::with_capacity(num_calls);
+                for h in handles {
+                    // Propaga errori di chiamata o panico del thread
+                    let r = h.join().map_err(|_| PyValueError::new_err("Thread panicked"))?;
+                    let (s, t) = r?;
+                    outs.push(s);
+                    times.push(t);
+                }
+                Ok((outs, times))
+            })?;
+
+            // Seleziona il migliore con majority voting (CPU-only) fuori dal GIL
+            let voting_result = py.allow_threads(|| select_best_by_majority_voting(&outputs))?;
             let total_time = start_time.elapsed();
 
             // Crea il dizionario di output.

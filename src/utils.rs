@@ -142,30 +142,33 @@ pub fn select_best_by_majority_voting(outputs: &[String]) -> PyResult<MajorityVo
         });
     }
 
-    // Conta le occorrenze di ogni risposta
-    let mut vote_counts: HashMap<String, usize> = HashMap::new();
-    for response in outputs {
-        *vote_counts.entry(response.clone()).or_insert(0) += 1;
-    }
-
-    // Trova la risposta con il maggior numero di voti
-    let mut max_votes = 0;
+    // Conta le occorrenze e traccia il primo indice in un'unica passata
+    // mappa: risposta -> (conteggio, primo_indice)
+    let mut counts: HashMap<String, (usize, usize)> = HashMap::with_capacity(n);
     let mut best_response = String::new();
-    for (response, count) in &vote_counts {
-        if *count > max_votes {
-            max_votes = *count;
-            best_response = response.clone();
+    let mut best_count: usize = 0;
+    let mut best_first_idx: usize = 0;
+
+    for (i, resp) in outputs.iter().enumerate() {
+        let entry = counts.entry(resp.clone()).or_insert((0, i));
+        entry.0 += 1;
+        let (cnt, first_idx) = *entry;
+        if cnt > best_count {
+            best_count = cnt;
+            best_first_idx = first_idx;
+            best_response = resp.clone();
         }
     }
 
-    // Trova l'indice della prima occorrenza della risposta vincente
-    let best_index = outputs.iter()
-        .position(|r| r == &best_response)
-        .unwrap_or(0);
+    // Proietta counts -> vote_counts (solo conteggi)
+    let mut vote_counts: HashMap<String, usize> = HashMap::with_capacity(counts.len());
+    for (k, (c, _)) in counts.into_iter() {
+        vote_counts.insert(k, c);
+    }
 
     Ok(MajorityVotingResult {
         best_response,
-        best_index,
+        best_index: best_first_idx,
         vote_counts,
         all_responses: outputs.to_vec(),
     })
