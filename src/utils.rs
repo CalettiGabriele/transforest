@@ -86,24 +86,34 @@ pub fn select_best_with_distances(outputs: &[String]) -> PyResult<MbrResult> {
         vectors.push(vec);
     }
 
-    // Trova l'indice con la distanza media minima e calcola tutte le distanze.
+    // Precalcola le norme per evitare ricalcoli durante le coppie
+    let norms: Vec<f64> = vectors
+        .iter()
+        .map(|v| (v.iter().map(|&x| x * x).sum::<f64>()).sqrt())
+        .collect();
+
+    // Calcola le distanze in modo simmetrico (i<j), accumulando i contributi per entrambi
+    let mut sum_dists = vec![0.0f64; n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let dot: f64 = vectors[i].iter().zip(&vectors[j]).map(|(&x, &y)| x * y).sum();
+            let denom = norms[i] * norms[j];
+            let sim = if denom == 0.0 { 0.0 } else { dot / denom };
+            let dist = 1.0 - sim;
+            sum_dists[i] += dist;
+            sum_dists[j] += dist;
+        }
+    }
+
+    // Calcola le medie e trova il migliore
     let mut min_avg_dist = f64::INFINITY;
     let mut best_idx = 0;
     let mut avg_distances = Vec::with_capacity(n);
-    
     for i in 0..n {
-        let mut total_dist = 0.0;
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            total_dist += cosine_distance(&vectors[i], &vectors[j]);
-        }
-        let avg_dist = total_dist / ((n - 1) as f64);
-        avg_distances.push(avg_dist);
-        
-        if avg_dist < min_avg_dist {
-            min_avg_dist = avg_dist;
+        let avg = if n > 1 { sum_dists[i] / ((n - 1) as f64) } else { 0.0 };
+        avg_distances.push(avg);
+        if avg < min_avg_dist {
+            min_avg_dist = avg;
             best_idx = i;
         }
     }
